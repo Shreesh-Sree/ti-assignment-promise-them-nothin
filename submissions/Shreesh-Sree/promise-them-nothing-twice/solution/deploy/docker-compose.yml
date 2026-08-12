@@ -1,0 +1,74 @@
+name: relayapi
+
+x-build: &build
+  context: ..
+  dockerfile: deploy/Dockerfile
+  args:
+    BUILD_TAGS: ${BUILD_TAGS:-}
+
+x-common-env: &common-env
+  RELAYAPI_CONFIG: /etc/relayapi/customers.yaml
+  RELAYAPI_LISTEN_ADDR: ":8080"
+  RELAYAPI_NODE_COUNT: "3"
+  RELAYAPI_COORDINATOR_MODE: ${COORDINATOR_MODE:-static}
+  RELAYAPI_PROPOSER: node-1
+  RELAYAPI_PEERS: "node-1=http://node1:8080,node-2=http://node2:8080,node-3=http://node3:8080"
+  # Empty by default (real clock). Set on the host shell before `up` to
+  # exercise a time-boxed override live — see deploy/Makefile's
+  # up-northwind-window target and internal/policy/devclock.go.
+  RELAYAPI_DEV_CLOCK_AS_OF: ${RELAYAPI_DEV_CLOCK_AS_OF:-}
+
+services:
+  node1:
+    build: *build
+    hostname: node1
+    volumes:
+      - ../configs/customers.yaml:/etc/relayapi/customers.yaml:ro
+    environment:
+      <<: *common-env
+      RELAYAPI_NODE_ID: node-1
+
+  node2:
+    build: *build
+    hostname: node2
+    volumes:
+      - ../configs/customers.yaml:/etc/relayapi/customers.yaml:ro
+    environment:
+      <<: *common-env
+      RELAYAPI_NODE_ID: node-2
+
+  node3:
+    build: *build
+    hostname: node3
+    volumes:
+      - ../configs/customers.yaml:/etc/relayapi/customers.yaml:ro
+    environment:
+      <<: *common-env
+      RELAYAPI_NODE_ID: node-3
+
+  nginx:
+    image: nginx:1.25-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - node1
+      - node2
+      - node3
+
+  # Containerized harness, for scenarios that are pure HTTP traffic
+  # (two-tenants-fair, over-limit-cutoff, window-boundary, northwind-batch)
+  # against the target given by -url. node-failure's --kill-cmd/--revive-cmd
+  # need to control sibling containers, which this container has no access
+  # to do — run node-failure (or the full suite) via `make harness` on the
+  # host instead, where a real docker CLI and this compose file are both
+  # already available. See deploy/Makefile.
+  harness:
+    build: *build
+    entrypoint: ["/usr/local/bin/harness"]
+    volumes:
+      - ../configs/customers.yaml:/etc/relayapi/customers.yaml:ro
+    depends_on:
+      - nginx
+    profiles: ["harness"] # only runs via `docker compose run harness ...`, never as part of `up`

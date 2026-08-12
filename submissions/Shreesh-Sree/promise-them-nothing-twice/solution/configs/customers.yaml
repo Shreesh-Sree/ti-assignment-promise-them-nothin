@@ -1,0 +1,61 @@
+# RelayAPI policy config. Fake customer IDs only — no real customer data,
+# per the assignment's demo constraint.
+#
+# Schema is enforced by internal/policy/config.go's Validate: this file
+# fails to load, loudly, if any override is missing an expiry, already
+# expired, lowers a limit instead of raising it, or references a customer
+# that isn't listed below. See DESIGN-NOTES.md Part 1 for why those rules
+# exist.
+
+tiers:
+  starter:
+    rpm: 60
+  growth:
+    rpm: 300
+  enterprise:
+    rpm: 0 # no shared default — always negotiated per customer via limit_rpm
+  harness_100: # dedicated tier for cmd/harness's fixed-100-RPM scenarios,
+    rpm: 100   # kept separate from growth/starter so scenario traffic never
+               # shares state or a round number with the demo customers above
+
+customers:
+  - id: cust_acme_retail
+    tier: growth
+  - id: cust_globex_shipping
+    tier: growth
+  - id: cust_initech_startup
+    tier: starter
+  - id: cust_northwind_logistics
+    tier: enterprise
+    limit_rpm: 300 # contracted RPM, per platform-context.md
+  # cmd/harness scenario customers — one per scenario that needs its own
+  # limiter state, so a single harness run doesn't have one scenario's
+  # traffic bleed into another's GCRA history.
+  - id: cust_harness_fair_a
+    tier: harness_100
+  - id: cust_harness_fair_b
+    tier: harness_100
+  - id: cust_harness_overlimit
+    tier: harness_100
+  - id: cust_harness_window
+    tier: harness_100
+  - id: cust_harness_nodefail
+    tier: harness_100
+
+overrides:
+  - customer: cust_northwind_logistics
+    limit_rpm: 1200
+    window:
+      start_utc: "02:00"
+      end_utc: "04:00" # nominal, contracted batch window (business fact)
+      grace_minutes: 60 # see resolver.go instantsFor: sized from the documented
+      # worst case (120-minute run + up to 60 minutes of queue-depth-driven
+      # start delay), not the raw contracted window — enforcement actually
+      # extends to 05:00 UTC. DESIGN-NOTES.md Part 1 §3 showed the raw
+      # 02:00-04:00 window has zero margin and breaks most nights.
+    expires: "2026-11-09" # 90 days out — config load fails once this passes
+    ticket: "OPS-4821"
+    reason: >
+      Temporary capacity accommodation for Northwind's nightly batch job
+      while the commercial renewal (contracted RPM increase) is finalized.
+      See DESIGN-NOTES.md Part 1 for the framing this resolves.
