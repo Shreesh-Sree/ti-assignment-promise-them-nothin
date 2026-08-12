@@ -44,7 +44,15 @@ customers:
 
 overrides:
   - customer: cust_northwind_logistics
-    limit_rpm: 1200
+    # Headroom formula from DESIGN-NOTES.md Part 1 (corrected in the
+    # "Stress-testing the invariant" section): P × (1 + T_sync/60) where
+    # P=1200 RPM (measured P99 peak per platform-context.md) and
+    # T_sync = T_poll + T_ack = 2.0s + 0.5s = 2.5s (corrected figure,
+    # not the bare T_poll=2s from §1 which assumed instant apply).
+    # Ceiling = 1200 × (1 + 2.5/60) = 1200 + 50 = 1250 RPM.
+    # Per-node share at 1250: ceil(1250/3) = 417 RPM (emission interval
+    # ~143.9ms vs 150ms at 1200 RPM). Safety bound: (417+1)×3 = 1254.
+    limit_rpm: 1250
     window:
       start_utc: "02:00"
       end_utc: "04:00" # nominal, contracted batch window (business fact)

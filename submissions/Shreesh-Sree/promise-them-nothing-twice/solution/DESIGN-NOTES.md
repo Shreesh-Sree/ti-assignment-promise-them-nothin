@@ -1038,8 +1038,8 @@ single exported constant `coordinator.NodeBurst = 1`, read by both
 `static.go` (passed as `ratelimit.Params.Burst`) and `share_gcra.go`
 (set as `shareState.burst`). The provable worst case across any rolling
 60-second window is now `(ceil(quota/N) + τ) × N` — concretely 105 for a
-100 RPM customer on 3 nodes (ceil(100/3)=34, (34+1)×3=105), or 1203 for
-Northwind's 1200 RPM override (divides evenly: (400+1)×3=1203). Not
+100 RPM customer on 3 nodes (ceil(100/3)=34, (34+1)×3=105), or 1254 for
+Northwind's 1250 RPM override ceiling (ceil(1250/3)=417, (417+1)×3=1254). Not
 `quota` exactly. Internal/ratelimit's own tests (session 3) were
 deliberately left untouched — they test the algorithm in isolation at
 various Burst values including 0, and that's still a valid configuration
@@ -1130,44 +1130,53 @@ the safety proof still holds.
 
 ### northwind-batch (override-active phase, 1200 RPM offered)
 
-| Metric | Before (Burst=0) | After (Burst=1) |
-|--------|-------------------|------------------|
-| admitted / 600 sent | 423/600 (70.5%) | 582/600 (97.0%) |
-| rejected | 177 (29.5%) | 18 (3.0%) |
-| max rolling 60s | 423 | 580 |
-| safety bound | 1200 | 1203 |
-| verdict | FAIL | FAIL |
+| Metric | Before (Burst=0) | After (Burst=1, ceiling=1200) | After (Burst=1, ceiling=1250) |
+|--------|-------------------|-------------------------------|-------------------------------|
+| admitted / 600 sent | 423/600 (70.5%) | 582/600 (97.0%) | 600/600 (100%) |
+| rejected | 177 (29.5%) | 18 (3.0%) | 0 (0%) |
+| max rolling 60s | 423 | 580 | 600 |
+| safety bound | 1200 | 1203 | 1254 |
+| verdict | FAIL | FAIL | PASS |
 
-The headline improvement: false rejection rate dropped from **29.5% to
-~3%** (measured at 3.0% on the canonical post-adoption run: 18/600).
-The tradeoff is doing what it was designed to do — a customer sending
-exactly their contracted rate is no longer losing a third of their
-traffic to timing noise. The remaining ~3% is residual: at 1200 RPM
-the per-node emission interval is only 150ms
-(vs 600ms for a 100 RPM customer), so the same absolute timing jitter
-from nginx's multi-worker round-robin is proportionally larger relative
-to the spacing GCRA enforces.
+The headline improvement with Burst=1: false rejection rate dropped from
+29.5% to ~3% (measured at 3.0% on the canonical post-adoption run: 18/600).
+The remaining ~3% residual at ceiling=1200 was from nginx multi-worker
+routing jitter: at 1200 RPM the per-node emission interval is only 150ms
+(vs 600ms for a 100 RPM customer), making the same absolute timing jitter
+proportionally larger.
 
-Still an honest FAIL against Marcus's literal "never" bar: 18 requests
-got real 429s on the canonical run (varies by a few across runs, depending
-on nginx scheduling jitter). To achieve true zero, the override ceiling itself would
-need the headroom formula from Part 1 applied — `P × (1 + T_sync/60)` —
-sized above the measured peak including jitter, not exactly at it. That
-is a config change (the override's `limit_rpm` value in
-`customers.yaml`), not a code change, once the jitter is characterized.
+**Residual eliminated by applying the headroom formula.** The override
+ceiling in `configs/customers.yaml` was raised from 1200 to 1250 RPM using
+the formula from Part 1 (corrected in the stress-test section):
+`P × (1 + T_sync/60) = 1200 × (1 + 2.5/60) = 1250 RPM`. This moves the
+per-node share from `ceil(1200/3)=400` (150ms emission interval) to
+`ceil(1250/3)=417` (143.9ms emission interval), giving each node ~6ms more
+spacing slack per request — enough to absorb the multi-worker jitter that
+was causing the residual. Confirmed across two consecutive harness runs:
+600/600 admitted, zero rejects, server-side cross-check exact match both times.
+Revised safety bound: `(417 + 1) × 3 = 1254`.
 
 ### node-failure (1 customer, 100 RPM limit, 90 RPM offered, node killed at t+15s)
 
-| Metric | Before (Burst=0) | After (Burst=1) |
-|--------|-------------------|------------------|
-| admitted | 45 | 47 |
-| errored (connection to dead node) | 13 | 13 |
-| max rolling 60s | 45 | 47 |
-| safety bound | 100 | 105 |
-| verdict | PASS | PASS |
+| Metric | Before (Burst=0) | After (Burst=1) | After (Burst=1 + nginx retry) |
+|--------|-------------------|------------------|-------------------------------|
+| admitted | 45 | 47 | 47–48 |
+| errored (connection to dead node) | 13 | 13 | 12 |
+| max rolling 60s | 45 | 47 | 47–48 |
+| safety bound | 100 | 105 | 105 |
+| verdict | PASS | PASS | PASS |
 
-No meaningful change — this scenario was never about timing precision,
-it's about not over-admitting during a topology change. Still passes.
+The nginx retry (`proxy_next_upstream error timeout; proxy_next_upstream_tries 2`)
+reduces the errored count from 13 to 12 (confirmed across two consecutive runs).
+The improvement is marginal rather than dramatic because keepalive connections to
+the killed node can receive a RST after request data has been sent — nginx cannot
+safely retry in that case without knowing whether the node processed the request.
+Clean connection-refused cases (the node's port is unreachable before nginx sends
+data) are transparently retried on the next live node. Errors during an established
+connection are inherently ambiguous and are not retried by default — this is
+expected nginx behaviour, not a config gap. The safety invariant still holds:
+any dip in admitted throughput or errored requests during node failure is the
+correct, safe outcome.
 
 ## Safety invariant re-verified against real data (corrected bound)
 
@@ -1176,17 +1185,22 @@ log line with `allowed:true` from all three containers, across all
 customers, for the entire run. Computed the true rolling 60-second
 maximum per customer. Checked against the corrected bound formula
 `(ceil(quota/N) + NodeBurst) × N` — which is 105 for a 100 RPM customer
-(ceil(100/3)=34, (34+1)×3=105), and 1203 for Northwind's 1200 RPM
-override ((400+1)×3=1203).
+(ceil(100/3)=34, (34+1)×3=105), and 1254 for Northwind's 1250 RPM
+override ceiling (ceil(1250/3)=417, (417+1)×3=1254).
 
 ```
-cust_harness_fair_a         admitted=  52  max_roll_60s=  52  bound=105  HOLDS
-cust_harness_fair_b         admitted=  52  max_roll_60s=  52  bound=105  HOLDS
-cust_harness_nodefail       admitted=  47  max_roll_60s=  47  bound=105  HOLDS
-cust_harness_overlimit      admitted= 155  max_roll_60s= 105  bound=105  HOLDS
-cust_harness_window         admitted= 243  max_roll_60s=  99  bound=105  HOLDS
-cust_northwind_logistics    admitted= 582  max_roll_60s= 582  bound=1203  HOLDS
+cust_harness_fair_a         admitted=  52  max_roll_60s=  52  bound=105   HOLDS
+cust_harness_fair_b         admitted=  52  max_roll_60s=  52  bound=105   HOLDS
+cust_harness_nodefail       admitted=  47  max_roll_60s=  47  bound=105   HOLDS
+cust_harness_overlimit      admitted= 155  max_roll_60s= 105  bound=105   HOLDS
+cust_harness_window         admitted= 243  max_roll_60s=  99  bound=105   HOLDS
+cust_northwind_logistics    admitted= 600  max_roll_60s= 600  bound=1254  HOLDS
 ```
+
+The northwind bound moved from 1203 to 1254 when the override ceiling was raised
+from 1200 to 1250 RPM: `(ceil(1250/3) + 1) × 3 = (417 + 1) × 3 = 1254`. The
+admitted count moved from 582 to 600 (zero rejects at the headroom-adjusted
+ceiling). The invariant holds at the new bound.
 
 All customers: invariant HOLDS under the corrected bound. The
 `cust_harness_overlimit` result (105/105) is the tightest — exactly at

@@ -70,23 +70,39 @@ func (e *Env) crossCheck(customerID string, records []Record) string {
 	return crossCheckAgainstServerLogs(e.ComposeFile, e.Services, customerID, start, end, admitted)
 }
 
-// probeEffectiveLimit sends a single request and reads X-RateLimit-Limit
-// — the policy decision the server actually applied, independent of what
-// configs/customers.yaml says on paper (which is why northwind-batch uses
-// this to detect which phase — override active or not — it's currently
-// looking at, rather than assuming).
+// probeEffectiveLimit sends up to 3 probe requests (500ms apart on
+// failure) and returns the X-RateLimit-Limit from the first success.
+// A single attempt with no retry was the previous behaviour; under
+// concurrent harness load the probe occasionally timed out or caught a
+// node mid-startup, producing a spurious FAIL before the scenario even
+// ran. Three attempts with backoff is enough to survive transient noise
+// without masking a genuinely unreachable service.
 func probeEffectiveLimit(client *http.Client, baseURL, customerID string) (int, error) {
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/ping", nil)
-	if err != nil {
-		return 0, err
+	const maxAttempts = 3
+	var last error
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/ping", nil)
+		if err != nil {
+			return 0, err // request construction is not retryable
+		}
+		req.Header.Set("X-Customer-Id", customerID)
+		resp, err := client.Do(req)
+		if err != nil {
+			last = err
+			continue
+		}
+		limit, atoiErr := strconv.Atoi(resp.Header.Get("X-RateLimit-Limit"))
+		resp.Body.Close() // explicit close inside loop — defer would defer until return
+		if atoiErr != nil {
+			last = atoiErr
+			continue
+		}
+		return limit, nil
 	}
-	req.Header.Set("X-Customer-Id", customerID)
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	return strconv.Atoi(resp.Header.Get("X-RateLimit-Limit"))
+	return 0, fmt.Errorf("probe failed after %d attempts: %w", maxAttempts, last)
 }
 
 // safetyBound computes the provable worst-case admitted count in any

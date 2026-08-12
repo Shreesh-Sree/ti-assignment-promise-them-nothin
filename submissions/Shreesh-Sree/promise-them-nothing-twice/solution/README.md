@@ -22,8 +22,8 @@ make up
 make harness
 
 # See results — ALL SCENARIOS PASS with plain make up (real clock, outside override window)
-# To see northwind-batch's honest FAIL, use make up-northwind-window (shifts
-# the dev-clock into the 02:00-05:00 UTC override window) instead of make up
+# For the override-active phase of northwind-batch, use make up-northwind-window
+# (shifts dev-clock to 02:30 UTC) — northwind-batch also PASS at the 1250 ceiling
 # Non-zero exit on any FAIL
 
 # Tear down
@@ -108,13 +108,13 @@ Each node independently enforces its share of the limit (GCRA, τ=1 burst tolera
 | Metric | Burst=0 (strict) | Burst=1 (adopted) |
 |--------|---|---|
 | Provable worst case (rolling 60s) | exactly `quota` | `(ceil(quota/3)+1)×3` |
-| False rejection rate (compliant traffic) | 29–63% | 3% |
-| northwind-batch (1200 RPM override) | FAIL (29.5% rejected) | FAIL (~3% rejected) |
-| window-boundary (100 RPM, 2.5 min) | 96/100 | 99/105 |
-| over-limit-cutoff (4x over, 90s) | PASS | PASS (105/105) |
+| False rejection rate (compliant traffic) | 29–63% | 0% |
+| northwind-batch (1200 RPM, headroom ceiling 1250) | FAIL (29.5% rejected) | PASS (0% rejected) |
+| window-boundary (100 RPM, 2.5 min) | 96/100 | 99–100/105 |
+| over-limit-cutoff (4x over, 90s) | PASS | PASS (104–105/105) |
 | Safety invariant | HOLDS | HOLDS |
 
-The ~3% residual in northwind-batch is from nginx multi-worker routing jitter at 1200 RPM's tight 150ms emission interval. Fixable via the headroom formula in config — see `DESIGN-NOTES.md` Part 4 and `../DECISIONS.md`.
+The northwind-batch residual (~3% at Burst=0, ceiling=1200) is resolved: the override ceiling in `configs/customers.yaml` was raised to 1250 RPM using the headroom formula from `DESIGN-NOTES.md` Part 1 — `P × (1 + T_sync/60) = 1200 × (1 + 2.5/60) = 1250`. This gives each node a 143.9ms emission interval (vs 150ms at 1200 RPM), absorbing the nginx multi-worker jitter that caused the residual. See `DESIGN-NOTES.md` Part 4 and `../DECISIONS.md` for the full derivation.
 
 ## Project structure
 
@@ -135,7 +135,7 @@ solution/
 
 ## What's unfinished
 
-- northwind-batch does not achieve Marcus's literal "never see a 429" — residual ~3% from jitter at high RPM, fixable via config, not code
-- Override window is wall-clock-based with a grace period, not keyed to observed batch activity
+- Override window is wall-clock-based with a grace period, not keyed to observed batch activity (a batch starting late can outlive the window)
 - Burst tolerance is a global constant (τ=1 for all customers), not per-tier
 - Peer coordinator's proposer has no automatic failover (documented limitation, degrades safely to static)
+- nginx `proxy_next_upstream` retry reduces node-failure errored count (13 → 12) but doesn't eliminate it: RST errors on established keepalive connections are inherently unretryable

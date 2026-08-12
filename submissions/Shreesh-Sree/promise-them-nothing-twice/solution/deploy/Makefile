@@ -5,9 +5,9 @@ COMPOSE = docker compose -f docker-compose.yml
 up:
 	$(COMPOSE) up -d --build node1 node2 node3 nginx
 	@echo "waiting for nodes to come up..."
-	@for i in 1 2 3; do \
-		until curl -sf http://localhost:8080/internal/healthz >/dev/null; do sleep 1; done; \
-	done
+	@until $(COMPOSE) exec -T node1 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE) exec -T node2 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE) exec -T node3 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
 	@echo "up. MODE=$${COORDINATOR_MODE:-static}"
 
 down:
@@ -58,9 +58,9 @@ harness-json:
 up-northwind-window:
 	RELAYAPI_DEV_CLOCK_AS_OF=2026-08-11T02:30:00Z $(COMPOSE) up -d --build node1 node2 node3 nginx
 	@echo "waiting for nodes to come up..."
-	@for i in 1 2 3; do \
-		until curl -sf http://localhost:8080/internal/healthz >/dev/null; do sleep 1; done; \
-	done
+	@until $(COMPOSE) exec -T node1 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE) exec -T node2 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE) exec -T node3 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
 	@echo "up, dev-clock pinned inside Northwind's override window (02:30 UTC)."
 
 # Bring up the stack with the deliberately broken fixed-window limiter.
@@ -70,9 +70,9 @@ up-northwind-window:
 up-fixedwindow:
 	BUILD_TAGS=fixedwindow COORDINATOR_MODE=fixedwindow $(COMPOSE) up -d --build node1 node2 node3 nginx
 	@echo "waiting for nodes to come up..."
-	@for i in 1 2 3; do \
-		until curl -sf http://localhost:8080/internal/healthz >/dev/null; do sleep 1; done; \
-	done
+	@until $(COMPOSE) exec -T node1 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE) exec -T node2 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@until $(COMPOSE) exec -T node3 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
 	@echo "up, FIXED-WINDOW MODE (deliberately broken — harness should catch it)."
 
 build:
