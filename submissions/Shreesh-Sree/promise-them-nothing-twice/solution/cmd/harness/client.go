@@ -61,7 +61,7 @@ func Offer(ctx context.Context, cfg OfferConfig) []Record {
 		go func() {
 			defer wg.Done()
 			for range requests {
-				records <- doRequest(cfg.Client, cfg.URL, cfg.CustomerID)
+				records <- doRequest(ctx, cfg.Client, cfg.URL, cfg.CustomerID)
 			}
 		}()
 	}
@@ -102,9 +102,9 @@ drain:
 	return collected
 }
 
-func doRequest(client *http.Client, url, customerID string) Record {
+func doRequest(ctx context.Context, client *http.Client, url, customerID string) Record {
 	sentAt := time.Now()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Record{SentAt: sentAt, ReceivedAt: time.Now(), Err: err}
 	}

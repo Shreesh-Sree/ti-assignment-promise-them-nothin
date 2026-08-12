@@ -1,13 +1,30 @@
 COMPOSE = docker compose -f docker-compose.yml
 
-.PHONY: up down logs harness harness-json build
+.PHONY: up down logs harness harness-json build wait-healthy up-northwind-window up-fixedwindow
+
+# wait-healthy polls each node's healthz endpoint directly (bypassing nginx,
+# which blocks /internal/ at the LB level) and fails loudly after 30 attempts
+# rather than hanging forever. On timeout it dumps recent compose logs so the
+# failure is diagnosable without a separate `make logs` run.
+wait-healthy:
+	@set -e; \
+	for node in node1 node2 node3; do \
+		i=0; \
+		until $(COMPOSE) exec -T $$node wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do \
+			i=$$((i+1)); \
+			if [ $$i -ge 30 ]; then \
+				echo "ERROR: $$node did not become healthy after 30s"; \
+				$(COMPOSE) logs --tail=50; \
+				exit 1; \
+			fi; \
+			sleep 1; \
+		done; \
+	done
 
 up:
 	$(COMPOSE) up -d --build node1 node2 node3 nginx
 	@echo "waiting for nodes to come up..."
-	@until $(COMPOSE) exec -T node1 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
-	@until $(COMPOSE) exec -T node2 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
-	@until $(COMPOSE) exec -T node3 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@$(MAKE) --no-print-directory wait-healthy
 	@echo "up. MODE=$${COORDINATOR_MODE:-static}"
 
 down:
@@ -58,9 +75,7 @@ harness-json:
 up-northwind-window:
 	RELAYAPI_DEV_CLOCK_AS_OF=2026-08-11T02:30:00Z $(COMPOSE) up -d --build node1 node2 node3 nginx
 	@echo "waiting for nodes to come up..."
-	@until $(COMPOSE) exec -T node1 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
-	@until $(COMPOSE) exec -T node2 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
-	@until $(COMPOSE) exec -T node3 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@$(MAKE) --no-print-directory wait-healthy
 	@echo "up, dev-clock pinned inside Northwind's override window (02:30 UTC)."
 
 # Bring up the stack with the deliberately broken fixed-window limiter.
@@ -70,9 +85,7 @@ up-northwind-window:
 up-fixedwindow:
 	BUILD_TAGS=fixedwindow COORDINATOR_MODE=fixedwindow $(COMPOSE) up -d --build node1 node2 node3 nginx
 	@echo "waiting for nodes to come up..."
-	@until $(COMPOSE) exec -T node1 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
-	@until $(COMPOSE) exec -T node2 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
-	@until $(COMPOSE) exec -T node3 wget -qO- http://localhost:8080/internal/healthz >/dev/null 2>&1; do sleep 1; done
+	@$(MAKE) --no-print-directory wait-healthy
 	@echo "up, FIXED-WINDOW MODE (deliberately broken — harness should catch it)."
 
 build:

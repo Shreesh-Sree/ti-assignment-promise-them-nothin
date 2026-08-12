@@ -84,6 +84,10 @@ func main() {
 
 	var results []ScenarioResult
 	for _, n := range names {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "harness: context cancelled before running %s (%v) — stopping\n", n, err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "harness: running %s...\n", n)
 		results = append(results, registry[n](ctx, env))
 	}

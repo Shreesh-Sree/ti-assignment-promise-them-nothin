@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,12 @@ type Resolver struct {
 // start serving traffic — if the config is invalid. Per DESIGN-NOTES.md:
 // fail to start, don't warn.
 func NewResolver(path string, clock ratelimit.Clock, logger *slog.Logger) (*Resolver, error) {
+	if clock == nil {
+		return nil, fmt.Errorf("policy: NewResolver requires a non-nil clock")
+	}
+	if logger == nil {
+		return nil, fmt.Errorf("policy: NewResolver requires a non-nil logger")
+	}
 	r := &Resolver{clock: clock, logger: logger}
 	if err := r.Reload(path); err != nil {
 		return nil, err

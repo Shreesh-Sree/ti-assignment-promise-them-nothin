@@ -135,6 +135,59 @@ func TestRollingWindowNotCalendarMinute(t *testing.T) {
 	}
 }
 
+// TestEmissionIntervalCeilingPreventsOverAdmission is the regression test for
+// the emissionInterval rounding direction fix. For any Quota that doesn't
+// divide evenly into Period, floor division produces an emission interval 1 ns
+// shorter than ceiling division. That 1 ns accumulates over Quota steps and
+// places the post-admit TAT 1 ns earlier than the ceiling version, allowing
+// one extra request to arrive at that TAT timestamp — over-admission.
+//
+// Quota=7, Period=1 minute:
+//   ceilEmission = ceil(60e9 ns / 7) = 8_571_428_572 ns (what the fix uses)
+//   floorEmission = floor(60e9 ns / 7) = 8_571_428_571 ns (what the old code used)
+//
+// After 7 requests at ceilEmission spacing, floor-based emissionInterval leaves
+// TAT at base + 6×ceil + floor = base + 60_000_000_003 ns. A request at that
+// instant equals TAT → admitted (now.Before(allowAt) is false at equality).
+// Ceiling-based emissionInterval leaves TAT at base + 7×ceil = 60_000_000_004 ns,
+// so the same request is before allowAt → rejected.
+func TestEmissionIntervalCeilingPreventsOverAdmission(t *testing.T) {
+	const quota = 7 // does not divide evenly into time.Minute (60e9 ns mod 7 = 6)
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := ratelimit.NewFakeClock(base)
+	limiter := ratelimit.NewLimiter(clock, ratelimit.Params{
+		Quota:  quota,
+		Period: time.Minute,
+		Burst:  0,
+	})
+
+	ceilEmission := (time.Minute + time.Duration(quota) - 1) / time.Duration(quota) // 8_571_428_572 ns
+	floorEmission := time.Minute / time.Duration(quota)                              // 8_571_428_571 ns
+
+	// Admit exactly Quota requests at ceil spacing. Both old (floor) and new
+	// (ceil) emissionInterval code admit these — requests arrive at or after
+	// the previous TAT in both cases.
+	for i := range quota {
+		clock.Set(base.Add(time.Duration(i) * ceilEmission))
+		if d := limiter.Allow("test"); !d.Allowed {
+			t.Fatalf("request %d/%d at ceil spacing: want admitted, got rejected", i+1, quota)
+		}
+	}
+
+	// oldTAT = base + (Quota-1)×ceil + floor: where floor-based emissionInterval
+	// would place TAT after Quota requests at ceil spacing. A request at this
+	// instant is admitted by old code (now == TAT) but rejected by new code
+	// (now is 1 ns before new TAT = base + Quota×ceil).
+	oldTAT := base.Add(time.Duration(quota-1)*ceilEmission + floorEmission)
+	clock.Set(oldTAT)
+	if d := limiter.Allow("test"); d.Allowed {
+		t.Errorf("request %d admitted at old-TAT (base+%v, 1ns before new TAT base+%v): "+
+			"emissionInterval uses floor division — TAT lands 1ns short, admitting "+
+			"an extra request before the period expires",
+			quota+1, oldTAT.Sub(base), time.Duration(quota)*ceilEmission)
+	}
+}
+
 // TestRetryAfterAlwaysPositiveOnReject hammers several quota/burst
 // configurations well past their limit and asserts the invariant that
 // matters most to a client deciding when to retry: RetryAfter is never

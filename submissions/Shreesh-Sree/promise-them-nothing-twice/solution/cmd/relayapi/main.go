@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,7 +42,11 @@ func main() {
 	nodeID := envOr("RELAYAPI_NODE_ID", "node-1")
 	configPath := envOr("RELAYAPI_CONFIG", "/etc/relayapi/customers.yaml")
 	listenAddr := envOr("RELAYAPI_LISTEN_ADDR", ":8080")
-	nodeCount := envInt("RELAYAPI_NODE_COUNT", 3)
+	nodeCount, err := envInt("RELAYAPI_NODE_COUNT", 3)
+	if err != nil {
+		logger.Error("startup_failed", "component", "config", "error", err)
+		os.Exit(1)
+	}
 	mode := envOr("RELAYAPI_COORDINATOR_MODE", "static") // "static" or "peer"
 
 	clock := policy.NewClockFromEnv(logger)
@@ -161,14 +166,14 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return d
 }
 
-func envInt(key string, def int) int {
+func envInt(key string, def int) (int, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
-		return def
+		return def, nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return def
+		return 0, fmt.Errorf("env %s=%q: %w", key, v, err)
 	}
-	return n
+	return n, nil
 }

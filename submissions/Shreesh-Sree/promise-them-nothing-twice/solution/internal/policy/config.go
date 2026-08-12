@@ -112,6 +112,12 @@ func (c *Config) Validate(now time.Time) error {
 		if !ok {
 			return fmt.Errorf("policy: customer %q references undefined tier %q", cust.ID, cust.Tier)
 		}
+		if tier.RPM < 0 {
+			return fmt.Errorf("policy: tier %q has negative rpm %d", cust.Tier, tier.RPM)
+		}
+		if cust.LimitRPM < 0 {
+			return fmt.Errorf("policy: customer %q has negative limit_rpm %d", cust.ID, cust.LimitRPM)
+		}
 		if tier.RPM == 0 && cust.LimitRPM == 0 {
 			return fmt.Errorf("policy: customer %q is on tier %q, which has no shared rpm, but sets no limit_rpm of its own", cust.ID, cust.Tier)
 		}
@@ -150,6 +156,9 @@ func (c *Config) Validate(now time.Time) error {
 		}
 		o.expiresAt = expiresAt
 
+		if o.LimitRPM <= 0 {
+			return fmt.Errorf("policy: override for %q has non-positive limit_rpm %d", o.Customer, o.LimitRPM)
+		}
 		contracted := contractedLimit(*cust, c.Tiers[cust.Tier])
 		if o.LimitRPM <= contracted {
 			return fmt.Errorf("policy: override for %q sets limit_rpm=%d, which does not raise the contracted limit of %d — overrides may only raise a limit",
@@ -170,6 +179,30 @@ func (c *Config) Validate(now time.Time) error {
 		}
 		if o.Window.GraceMinutes < 0 {
 			return fmt.Errorf("policy: override for %q has a negative grace_minutes", o.Customer)
+		}
+	}
+
+	// Reject overlapping override windows for the same customer. The resolver
+	// picks the first matching override in YAML order; two overlapping windows
+	// for one customer would make effective-limit resolution depend on YAML
+	// ordering rather than an explicit, auditable decision — against the
+	// "no silent behavior" principle in DESIGN-NOTES.md.
+	type window struct{ start, end time.Duration }
+	byCustomer := make(map[string][]window)
+	for i := range c.Overrides {
+		o := &c.Overrides[i]
+		start, _ := parseTimeOfDay(o.Window.StartUTC) // already validated above
+		end, _ := parseTimeOfDay(o.Window.EndUTC)     // already validated above
+		end += time.Duration(o.Window.GraceMinutes) * time.Minute
+		byCustomer[o.Customer] = append(byCustomer[o.Customer], window{start, end})
+	}
+	for custID, windows := range byCustomer {
+		for i := 0; i < len(windows); i++ {
+			for j := i + 1; j < len(windows); j++ {
+				if windows[i].start < windows[j].end && windows[j].start < windows[i].end {
+					return fmt.Errorf("policy: customer %q has overlapping override windows — resolve the ambiguity before starting", custID)
+				}
+			}
 		}
 	}
 

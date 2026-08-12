@@ -17,9 +17,18 @@ type Params struct {
 }
 
 // emissionInterval is the minimum spacing between admissions once burst
-// tolerance is exhausted: one Quota-th of Period.
+// tolerance is exhausted: one Quota-th of Period, rounded UP to the nearest
+// nanosecond. Ceiling division is required here: floor division (the
+// result of float64 truncation or integer division) produces an interval
+// that is slightly too small, meaning requests can arrive at a rate
+// fractionally above quota and still be admitted — over-admission, the
+// direction DESIGN-NOTES.md "The invariant" explicitly rules out.
+// Ceiling division rounds toward a slightly stricter spacing, making the
+// error direction under-admission (a request waits one extra nanosecond
+// before it would be admitted), which is the accepted tradeoff everywhere
+// in this codebase.
 func (p Params) emissionInterval() time.Duration {
-	return time.Duration(float64(p.Period) / float64(p.Quota))
+	return (p.Period + time.Duration(p.Quota) - 1) / time.Duration(p.Quota)
 }
 
 // decide is the pure GCRA core. Given a customer's prior theoretical

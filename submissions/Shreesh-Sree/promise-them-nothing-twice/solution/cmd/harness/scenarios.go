@@ -20,12 +20,15 @@ import (
 // reason to give up the safety margin of avoiding sh -c when a plain argv
 // split does the same job for the commands this actually needs to run
 // (e.g. "docker compose -f docker-compose.yml stop node2").
-func runShellWords(cmd string) error {
+// ctx is threaded through so the subprocess is killed if the context is
+// cancelled; callers that must complete regardless (e.g. revive) should
+// pass context.Background() or a fresh context with its own timeout.
+func runShellWords(ctx context.Context, cmd string) error {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
 		return nil
 	}
-	return exec.Command(fields[0], fields[1:]...).Run()
+	return exec.CommandContext(ctx, fields[0], fields[1:]...).Run()
 }
 
 // Env is everything a scenario needs that isn't specific to it: where the
@@ -77,14 +80,18 @@ func (e *Env) crossCheck(customerID string, records []Record) string {
 // node mid-startup, producing a spurious FAIL before the scenario even
 // ran. Three attempts with backoff is enough to survive transient noise
 // without masking a genuinely unreachable service.
-func probeEffectiveLimit(client *http.Client, baseURL, customerID string) (int, error) {
+func probeEffectiveLimit(ctx context.Context, client *http.Client, baseURL, customerID string) (int, error) {
 	const maxAttempts = 3
 	var last error
 	for attempt := range maxAttempts {
 		if attempt > 0 {
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
-		req, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/ping", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/ping", nil)
 		if err != nil {
 			return 0, err // request construction is not retryable
 		}
@@ -187,8 +194,8 @@ func scenarioTwoTenantsFair(ctx context.Context, env *Env) ScenarioResult {
 	const duration = 30 * time.Second
 	client := newHTTPClient(10)
 
-	limitA, _ := probeEffectiveLimit(client, env.BaseURL, "cust_harness_fair_a")
-	limitB, _ := probeEffectiveLimit(client, env.BaseURL, "cust_harness_fair_b")
+	limitA, _ := probeEffectiveLimit(ctx, client, env.BaseURL, "cust_harness_fair_a")
+	limitB, _ := probeEffectiveLimit(ctx, client, env.BaseURL, "cust_harness_fair_b")
 
 	var recA, recB []Record
 	var wg sync.WaitGroup
@@ -243,7 +250,7 @@ func scenarioOverLimitCutoff(ctx context.Context, env *Env) ScenarioResult {
 	const duration = 90 * time.Second // long enough to guarantee crossing at least one calendar-minute boundary, which is what exposes fixed-window's 2x bug
 	client := newHTTPClient(20)
 
-	limit, _ := probeEffectiveLimit(client, env.BaseURL, "cust_harness_overlimit")
+	limit, _ := probeEffectiveLimit(ctx, client, env.BaseURL, "cust_harness_overlimit")
 	records := Offer(ctx, OfferConfig{Client: client, URL: env.pingURL(), CustomerID: "cust_harness_overlimit", RPM: rpm, Duration: duration, Concurrency: 20})
 
 	c := makeCustomerResult(env, "cust_harness_overlimit", rpm, limit, records)
@@ -264,7 +271,7 @@ func scenarioWindowBoundary(ctx context.Context, env *Env) ScenarioResult {
 	const duration = 150 * time.Second // long enough to guarantee at least 2 calendar-minute boundaries are crossed
 	client := newHTTPClient(10)
 
-	limit, _ := probeEffectiveLimit(client, env.BaseURL, "cust_harness_window")
+	limit, _ := probeEffectiveLimit(ctx, client, env.BaseURL, "cust_harness_window")
 	records := Offer(ctx, OfferConfig{Client: client, URL: env.pingURL(), CustomerID: "cust_harness_window", RPM: rpm, Duration: duration, Concurrency: 10})
 
 	c := makeCustomerResult(env, "cust_harness_window", rpm, limit, records)
@@ -325,7 +332,7 @@ func scenarioNorthwindBatch(ctx context.Context, env *Env) ScenarioResult {
 	const duration = 30 * time.Second
 	client := newHTTPClient(40)
 
-	limit, err := probeEffectiveLimit(client, env.BaseURL, customerID)
+	limit, err := probeEffectiveLimit(ctx, client, env.BaseURL, customerID)
 	if err != nil {
 		return ScenarioResult{
 			Name:  "northwind-batch",
@@ -390,7 +397,7 @@ func scenarioNodeFailure(ctx context.Context, env *Env) ScenarioResult {
 	const duration = 40 * time.Second
 	client := newHTTPClient(10)
 
-	limit, _ := probeEffectiveLimit(client, env.BaseURL, customerID)
+	limit, _ := probeEffectiveLimit(ctx, client, env.BaseURL, customerID)
 
 	var notes []string
 
@@ -406,7 +413,7 @@ func scenarioNodeFailure(ctx context.Context, env *Env) ScenarioResult {
 		go func() {
 			select {
 			case <-time.After(env.KillAt):
-				_ = runShellWords(env.KillCmd)
+				_ = runShellWords(killCtx, env.KillCmd)
 				killCh <- killResult{
 					note: fmt.Sprintf("t+%v: running kill command: %s", env.KillAt, env.KillCmd),
 					did:  true,
@@ -426,7 +433,9 @@ func scenarioNodeFailure(ctx context.Context, env *Env) ScenarioResult {
 	cancelKill()
 
 	if env.ReviveCmd != "" {
-		_ = runShellWords(env.ReviveCmd)
+		// Use context.Background() for the revive: ctx may be cancelled (timeout)
+		// but the revive must always complete to leave the stack in a known state.
+		_ = runShellWords(context.Background(), env.ReviveCmd)
 		notes = append(notes, fmt.Sprintf("ran revive command to restore the stack: %s", env.ReviveCmd))
 	}
 
