@@ -143,8 +143,9 @@ func TestRollingWindowNotCalendarMinute(t *testing.T) {
 // one extra request to arrive at that TAT timestamp — over-admission.
 //
 // Quota=7, Period=1 minute:
-//   ceilEmission = ceil(60e9 ns / 7) = 8_571_428_572 ns (what the fix uses)
-//   floorEmission = floor(60e9 ns / 7) = 8_571_428_571 ns (what the old code used)
+//
+//	ceilEmission = ceil(60e9 ns / 7) = 8_571_428_572 ns (what the fix uses)
+//	floorEmission = floor(60e9 ns / 7) = 8_571_428_571 ns (what the old code used)
 //
 // After 7 requests at ceilEmission spacing, floor-based emissionInterval leaves
 // TAT at base + 6×ceil + floor = base + 60_000_000_003 ns. A request at that
@@ -162,7 +163,7 @@ func TestEmissionIntervalCeilingPreventsOverAdmission(t *testing.T) {
 	})
 
 	ceilEmission := (time.Minute + time.Duration(quota) - 1) / time.Duration(quota) // 8_571_428_572 ns
-	floorEmission := time.Minute / time.Duration(quota)                              // 8_571_428_571 ns
+	floorEmission := time.Minute / time.Duration(quota)                             // 8_571_428_571 ns
 
 	// Admit exactly Quota requests at ceil spacing. Both old (floor) and new
 	// (ceil) emissionInterval code admit these — requests arrive at or after
