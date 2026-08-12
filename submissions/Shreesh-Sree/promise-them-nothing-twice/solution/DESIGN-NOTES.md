@@ -1186,7 +1186,12 @@ customers, for the entire run. Computed the true rolling 60-second
 maximum per customer. Checked against the corrected bound formula
 `(ceil(quota/N) + NodeBurst) × N` — which is 105 for a 100 RPM customer
 (ceil(100/3)=34, (34+1)×3=105), and 1254 for Northwind's 1250 RPM
-override ceiling (ceil(1250/3)=417, (417+1)×3=1254).
+override ceiling (ceil(1250/3)=417, (417+1)×3=1254). The figures below
+are from one specific captured run; `cust_harness_nodefail` shows
+admitted=47 here, while Part 4's node-failure table reports "47–48"
+across the two verification runs — that range reflects normal run-to-run
+variance in how many requests land before the kill fires, not a
+discrepancy between two measurements of the same run.
 
 ```
 cust_harness_fair_a         admitted=  52  max_roll_60s=  52  bound=105   HOLDS
