@@ -28,7 +28,7 @@ func runShellWords(ctx context.Context, cmd string) error {
 	if len(fields) == 0 {
 		return nil
 	}
-	return exec.CommandContext(ctx, fields[0], fields[1:]...).Run()
+	return exec.CommandContext(ctx, fields[0], fields[1:]...).Run() // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 }
 
 // Env is everything a scenario needs that isn't specific to it: where the

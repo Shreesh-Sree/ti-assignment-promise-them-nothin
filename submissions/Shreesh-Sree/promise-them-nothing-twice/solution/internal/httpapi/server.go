@@ -7,9 +7,10 @@
 package httpapi
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -190,8 +191,14 @@ func jitteredRetryAfterSeconds(base time.Duration) string {
 	if base <= 0 {
 		base = time.Second
 	}
-	jitter := time.Duration(rand.Float64() * jitterFraction * float64(base))
+	jitter := time.Duration(cryptoFloat64() * jitterFraction * float64(base))
 	return itoa(ceilSeconds(base + jitter))
+}
+
+func cryptoFloat64() float64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return float64(binary.LittleEndian.Uint64(b[:])>>11) / (1 << 53)
 }
 
 func ceilSeconds(d time.Duration) int {
