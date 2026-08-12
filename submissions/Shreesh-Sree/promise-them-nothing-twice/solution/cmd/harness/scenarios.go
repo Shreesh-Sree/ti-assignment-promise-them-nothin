@@ -359,6 +359,15 @@ func scenarioNorthwindBatch(ctx context.Context, env *Env) ScenarioResult {
 
 // --- node-failure ---
 
+// killResult carries what the kill goroutine observed, communicated back
+// to the main goroutine through a channel rather than shared variables to
+// avoid the data race CodeRabbit flagged: the goroutine and the main path
+// both appended to `notes` and wrote/read `killed` with no synchronization.
+type killResult struct {
+	note string
+	did  bool // true if the kill command actually ran
+}
+
 func scenarioNodeFailure(ctx context.Context, env *Env) ScenarioResult {
 	const customerID = "cust_harness_nodefail"
 	const rpm = 90 // deliberately under the 100 RPM limit — this scenario is about safety during a topology change, not cutoff behavior
@@ -368,15 +377,26 @@ func scenarioNodeFailure(ctx context.Context, env *Env) ScenarioResult {
 	limit, _ := probeEffectiveLimit(client, env.BaseURL, customerID)
 
 	var notes []string
-	killed := false
+
+	// killCh receives exactly one value: either the kill fired or the
+	// scenario ended before kill-at elapsed. Buffered so the goroutine
+	// never blocks regardless of whether the main path drains it.
+	killCh := make(chan killResult, 1)
+
+	killCtx, cancelKill := context.WithCancel(ctx)
+	defer cancelKill()
+
 	if env.KillCmd != "" {
 		go func() {
 			select {
 			case <-time.After(env.KillAt):
-				notes = append(notes, fmt.Sprintf("t+%v: running kill command: %s", env.KillAt, env.KillCmd))
 				_ = runShellWords(env.KillCmd)
-				killed = true
-			case <-ctx.Done():
+				killCh <- killResult{
+					note: fmt.Sprintf("t+%v: running kill command: %s", env.KillAt, env.KillCmd),
+					did:  true,
+				}
+			case <-killCtx.Done():
+				killCh <- killResult{did: false}
 			}
 		}()
 	} else {
@@ -385,18 +405,30 @@ func scenarioNodeFailure(ctx context.Context, env *Env) ScenarioResult {
 
 	records := Offer(ctx, OfferConfig{Client: client, URL: env.pingURL(), CustomerID: customerID, RPM: rpm, Duration: duration, Concurrency: 10})
 
+	// Cancel the kill timer now that Offer has returned; if kill-at ≥
+	// duration the kill must not fire after the revive has already run.
+	cancelKill()
+
 	if env.ReviveCmd != "" {
 		_ = runShellWords(env.ReviveCmd)
 		notes = append(notes, fmt.Sprintf("ran revive command to restore the stack: %s", env.ReviveCmd))
 	}
 
-	c := makeCustomerResult(env, customerID, rpm, limit, records)
-
-	if killed {
-		notes = append(notes, fmt.Sprintf(
-			"a node was stopped mid-run (t+%v of a %v scenario). ANY dip in admitted throughput or errored requests after that point is the EXPECTED, SAFE outcome — under-limiting during recovery is correct behavior, not a bug. Node distribution below will show a reduced or zero share for the killed node from that point on.",
-			env.KillAt, duration))
+	// Drain the kill channel synchronously — the goroutine is guaranteed to
+	// have sent by now (cancelKill() unblocked it if it hadn't fired yet).
+	if env.KillCmd != "" {
+		kr := <-killCh
+		if kr.note != "" {
+			notes = append(notes, kr.note)
+		}
+		if kr.did {
+			notes = append(notes, fmt.Sprintf(
+				"a node was stopped mid-run (t+%v of a %v scenario). ANY dip in admitted throughput or errored requests after that point is the EXPECTED, SAFE outcome — under-limiting during recovery is correct behavior, not a bug. Node distribution below will show a reduced or zero share for the killed node from that point on.",
+				env.KillAt, duration))
+		}
 	}
+
+	c := makeCustomerResult(env, customerID, rpm, limit, records)
 	notes = append(notes, fmt.Sprintf(
 		"the only failure condition this scenario checks: global admitted count in any rolling 60-second window across ALL nodes never exceeded the %d RPM limit, even during and after the node failure. Verdict below is that check, nothing else.", limit))
 
